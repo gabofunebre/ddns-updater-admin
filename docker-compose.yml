@@ -1,0 +1,34 @@
+services:
+  ddns-updater:
+    image: qmcgaw/ddns-updater:latest
+    container_name: ddns-updater
+    restart: unless-stopped
+    networks: [DDNS_tunn_net]
+    user: "1000:1000"
+    volumes:
+      - ./:/updater/data
+    environment:
+      - PERIOD=5m
+      - LOG_LEVEL=info
+      - PUBLICIP_HTTP_PROVIDERS=all
+      - TZ=America/Argentina/Buenos_Aires
+
+  ddns-admin:
+    build: ./admin
+    container_name: ddns-admin
+    restart: unless-stopped
+    networks: [DDNS_tunn_net]
+    user: "0:0"   # root para poder usar /var/run/docker.sock
+    volumes:
+      - ./:/config:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CONFIG_PATH=/config/config.json
+      - DDNS_CONTAINER_NAME=ddns-updater
+      - ENABLE_DOCKER_RESTART=true
+      - CONFIG_OWNER_UID=1000
+      - CONFIG_OWNER_GID=1000
+
+networks:
+  DDNS_tunn_net:
+    external: true
