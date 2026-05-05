@@ -2,11 +2,112 @@ import os, json, stat, subprocess
 from flask import Flask, request, redirect, render_template_string, flash, url_for
 
 # ---------- Templates ----------
-TPL_INDEX = """..."""  # (idéntico a tu versión, no lo recorto por brevedad)
-TPL_FORM = """..."""   # (idéntico a tu versión, no lo recorto por brevedad)
+TPL_INDEX = """
+<!doctype html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+<title>DDNS Config</title>
+</head><body class="p-4">
+<div class="container" style="max-width:1100px">
+  <h3 class="mb-3">Cloudflare DDNS – Registros</h3>
+  {% with m=get_flashed_messages() %}{% if m %}<div class="alert alert-info">{{ m[0] }}</div>{% endif %}{% endwith %}
+
+  <div class="d-flex gap-2 mb-3">
+    <a class="btn btn-primary" href="{{ url_for('add') }}">Agregar registro</a>
+    {% if can_restart %}
+      <form method="post" action="{{ url_for('restart') }}" class="d-inline">
+        <button class="btn btn-outline-danger" onclick="return confirm('Reiniciar ddns-updater ahora?')">Reiniciar updater</button>
+      </form>
+    {% endif %}
+    <a class="btn btn-secondary" href="{{ url_for('status') }}" target="_blank">Ver estado (UI updater)</a>
+  </div>
+
+  <div class="table-responsive">
+  <table class="table table-sm align-middle">
+    <thead><tr>
+      <th>#</th><th>Dominio (FQDN)</th><th>Zone ID</th><th>IPv</th><th>Proxied</th><th>TTL</th><th>Acciones</th>
+    </tr></thead>
+    <tbody>
+    {% for s in settings %}
+      <tr>
+        <td>{{ loop.index0 }}</td>
+        <td class="fw-semibold">{{ s.get('domain','') }}</td>
+        <td><code style="font-size:0.8rem">{{ (s.get('zone_identifier','')[:8]+'…') if s.get('zone_identifier') else '' }}</code></td>
+        <td>{{ s.get('ip_version','ipv4') }}</td>
+        <td>{{ 'ON' if s.get('proxied') else 'OFF' }}</td>
+        <td>{{ s.get('ttl',1) }}</td>
+        <td class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-primary" href="{{ url_for('edit', idx=loop.index0) }}">Editar</a>
+          <form method="post" action="{{ url_for('delete', idx=loop.index0) }}" onsubmit="return confirm('Eliminar registro {{ s.get('domain','') }}?')">
+            <button class="btn btn-sm btn-outline-danger">Eliminar</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="text-muted">Sin registros. Hacé clic en “Agregar registro”.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+
+  <p class="text-muted small mt-4">El archivo se guarda en: <code>{{ config_path }}</code>. Protegé este sitio con Cloudflare Access.</p>
+</div></body></html>
+"""
+
+TPL_FORM = """
+<!doctype html><html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+<title>{{ 'Editar' if editing else 'Agregar' }} registro</title>
+</head><body class="p-4">
+<div class="container" style="max-width:900px">
+  <h4 class="mb-3">{{ 'Editar' if editing else 'Agregar' }} registro</h4>
+  <form method="post">
+    <div class="row g-3">
+      <div class="col-md-8">
+        <label class="form-label">Dominio (FQDN)</label>
+        <input name="domain" class="form-control" required value="{{ s.get('domain','') or 'ddns.gabo.ar' }}">
+        <div class="form-text">Ej: ddns.gabo.ar</div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">IP version</label>
+        <select name="ip_version" class="form-select">
+          <option value="ipv4" {% if s.get('ip_version','ipv4')=='ipv4' %}selected{% endif %}>ipv4</option>
+          <option value="ipv6" {% if s.get('ip_version')=='ipv6' %}selected{% endif %}>ipv6</option>
+        </select>
+      </div>
+      <div class="col-md-12">
+        <label class="form-label">Zone ID</label>
+        <input name="zone_identifier" class="form-control" required value="{{ s.get('zone_identifier','') }}">
+      </div>
+      <div class="col-md-12">
+        <label class="form-label">API Token (DNS Edit)</label>
+        <input name="token" class="form-control" required value="{{ s.get('token','') }}">
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Proxied</label>
+        <select name="proxied" class="form-select">
+          <option value="false" {% if not s.get('proxied') %}selected{% endif %}>OFF (DNS only)</option>
+          <option value="true"  {% if s.get('proxied') %}selected{% endif %}>ON</option>
+        </select>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">TTL</label>
+        <input name="ttl" type="number" min="1" class="form-control" value="{{ s.get('ttl',1) }}">
+        <div class="form-text">1 = Auto</div>
+      </div>
+    </div>
+    <div class="mt-4 d-flex gap-2">
+      <button class="btn btn-primary" type="submit">Guardar</button>
+      <a class="btn btn-secondary" href="{{ url_for('index') }}">Volver</a>
+    </div>
+  </form>
+</div></body></html>
+"""
 
 # ---------- App ----------
 def create_app():
+    # static_folder=None para que no choque con /static proxy
     app = Flask(__name__, static_folder=None)
     app.secret_key = os.urandom(16)
 
@@ -107,20 +208,13 @@ def create_app():
 
     # ----- proxy a la UI nativa del updater (+ estáticos) -----
     def _proxy_to_updater(path="/"):
-        import urllib.request, urllib.error
+        import urllib.request
         base = "http://ddns-updater:8000"
         req = urllib.request.Request(base + path, headers={"User-Agent": "ddns-admin-proxy"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as r:
-                body = r.read()
-                ct = r.headers.get("Content-Type", "application/octet-stream")
-                return body, r.getcode(), {"Content-Type": ct}
-        except urllib.error.HTTPError as e:
-            body = e.read() or b""
-            ct = e.headers.get("Content-Type", "text/plain") if getattr(e, "headers", None) else "text/plain"
-            return body, e.code, {"Content-Type": ct}
-        except urllib.error.URLError:
-            return b"ddns-updater no disponible", 502, {"Content-Type": "text/plain"}
+        with urllib.request.urlopen(req, timeout=10) as r:
+            body = r.read()
+            ct = r.headers.get("Content-Type", "application/octet-stream")
+            return body, r.getcode(), {"Content-Type": ct}
 
     @app.route("/status")
     def status():
@@ -132,9 +226,6 @@ def create_app():
 
     @app.route("/favicon.ico")
     def favicon_proxy():
-        body, status, headers = _proxy_to_updater("/favicon.ico")
-        if status == 404:
-            return b"", 204, {"Content-Type": "text/plain"}
-        return body, status, headers
+        return _proxy_to_updater("/favicon.ico")
 
     return app
