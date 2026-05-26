@@ -1,5 +1,6 @@
 import os, json, stat, subprocess
 from flask import Flask, request, redirect, render_template_string, flash, url_for
+from urllib.error import URLError, HTTPError
 
 # ---------- Templates ----------
 TPL_INDEX = """
@@ -211,10 +212,21 @@ def create_app():
         import urllib.request
         base = "http://ddns-updater:8000"
         req = urllib.request.Request(base + path, headers={"User-Agent": "ddns-admin-proxy"})
-        with urllib.request.urlopen(req, timeout=10) as r:
-            body = r.read()
-            ct = r.headers.get("Content-Type", "application/octet-stream")
-            return body, r.getcode(), {"Content-Type": ct}
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                body = r.read()
+                ct = r.headers.get("Content-Type", "application/octet-stream")
+                return body, r.getcode(), {"Content-Type": ct}
+        except HTTPError as e:
+            msg = f"UI updater devolvió HTTP {e.code} para {path}."
+            return msg, 502, {"Content-Type": "text/plain; charset=utf-8"}
+        except URLError as e:
+            reason = getattr(e, "reason", e)
+            msg = (
+                "No se pudo conectar a ddns-updater en http://ddns-updater:8000. "
+                f"Detalle: {reason}"
+            )
+            return msg, 502, {"Content-Type": "text/plain; charset=utf-8"}
 
     @app.route("/status")
     def status():
